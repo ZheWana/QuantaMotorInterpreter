@@ -42,6 +42,7 @@ class Interpreter:
         self.ser = None
         self.state = State.INIT
         self.line_number = 0  # 记录当前行号
+        self.entry_line_number = 0  # 记录当前行号
         self.line = ""
         self.loop_time = 0
         self.loop_body = ""  # 记录循环体代码
@@ -75,9 +76,15 @@ class Interpreter:
         else:
             self.exec_flag = 0
 
-    def error_log(self, msg: str):
+    def error_log(self, msg: str, line_number=None):
+        if line_number is None:
+            line_number = self.line_number
+
+        if inspect.stack()[1].function == "thread_main":
+            self.waiting_for_axis()
+
         with self.data_lock:
-            print("[Error]: " + str(self.line_number) + ": " + self.msgs[msg])
+            print("[Error]: " + str(line_number) + ": " + self.msgs[msg])
         if self.exec_flag:
             input(self.msgs["exec_err"])
             # self.x_queue.put("stop")
@@ -90,22 +97,17 @@ class Interpreter:
         with self.data_lock:
             print("[Serial]: " + self.msgs[msg])
 
-    def content_check(self, content_list: list, content: str):
+    @staticmethod
+    def content_check(content_list: list, content: str):
         for cmd in content_list:
             if content == cmd:
                 return True
         return False
 
-    def check_output(self, command: str):
-        if self.content_check(self.cmd_list, command.split(" ")[0].strip().lower()):
-            with self.data_lock:
-                print("[Checking] " + str(self.line_number) + ": " + command)
-                time.sleep(0.01)
-        else:
-            self.error_log("cmd_err")
-        pass
+    def serial_output(self, command: str, line_number=None):
+        if line_number is None:
+            line_number = self.line_number
 
-    def serial_output(self, command: str):
         if inspect.stack()[1].function == "thread_main":
             self.waiting_for_axis()
 
@@ -113,9 +115,11 @@ class Interpreter:
             with self.data_lock:
                 if self.exec_flag:
                     print("[Running] " + command)
+                    if self.ser is not None:
+                        self.ser.write(command.strip().encode() + "\n".encode())
                 else:
-                    print("[Checking] " + str(self.line_number) + ": " + command)
-                time.sleep(0.01)
+                    print("[Checking] " + command)
+            time.sleep(0.01)
         else:
             self.error_log("cmd_err")
         pass
