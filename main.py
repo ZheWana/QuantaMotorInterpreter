@@ -32,7 +32,7 @@ class Interpreter:
         "ask_if_run": "Would you like to run the script or just check it out?\nY for run, n for check.\nInput(Y/n):"
     }
 
-    cmd_list = ["ctrl", "echoff", "delay", "while", "endwhile", "e", "ab", "set"]
+    cmd_list = ["ctrl", "echoff", "delay", "while", "endwhile", "e", "ab", "set", "join"]
 
     mstep_list = ["200", "400", "800", "1600", "3200", "6400", "12800", "25600",
                   "1000", "2000", "4000", "5000", "8000", "10000", "20000", "25000"]
@@ -52,6 +52,8 @@ class Interpreter:
         self.data_lock = threading.Lock()
 
         # 轴向线程及其需要的消息队列、条件变量、条件标志位、运行标志位
+        self.t_in = None
+
         self.tx = None
         self.x_running = False
         self.x_cond_flag = True
@@ -76,6 +78,30 @@ class Interpreter:
         else:
             self.exec_flag = 0
 
+    def thread_input(self):
+        if self.ser is None:
+            reply = input()
+        else:
+            reply = self.ser.readline()
+
+        self.x_queue.put(reply)
+        self.y_queue.put(reply)
+
+        self.t_in = None
+
+    def serial_input(self, axis: str, msg=None):
+        with self.data_lock:
+            if msg is not None:
+                print(msg)
+            if self.t_in is None:
+                self.t_in = threading.Thread(target=self.thread_input)
+                self.t_in.start()
+
+        if axis == "X":
+            return self.x_queue.get()
+        elif axis == "Y":
+            return self.y_queue.get()
+
     def error_log(self, msg: str, line_number=None):
         if line_number is None:
             line_number = self.line_number
@@ -92,10 +118,6 @@ class Interpreter:
             # self.tx.join()
             # self.ty.join()
             # exit()
-
-    def serial_log(self, msg: str):
-        with self.data_lock:
-            print("[Serial]: " + self.msgs[msg])
 
     @staticmethod
     def content_check(content_list: list, content: str):
@@ -168,17 +190,34 @@ class Interpreter:
     def thread_axis(self, axis: str, q: queue.Queue):
         axis_name = axis.strip().upper()
         while True:
+            output_flag = 0
+
             line = q.get()
             if line == "stop":
                 exit()
 
+            elif line == "Xstop" or line == "Ystop" \
+                    or line == "Xzero" or line == "Yzero":
+                continue
+
             if type(line) == str:
                 self.serial_output(line)
-                time.sleep(0.01)
-
-                time.sleep(1)
+                output_flag = 1
             else:
                 self.error_log("type_err")
+
+            # 等待线程接收运行结果
+            if self.exec_flag:
+                while output_flag == 1:
+                    reply = self.serial_input(axis)
+                    if line.split(" ")[0] == "ctrl":
+                        if reply == axis + "stop":
+                            output_flag = 0
+                            break
+                    elif line.split(" ")[0] == "zero":
+                        if reply == axis + "zero":
+                            output_flag = 0
+                            break
 
             with self.data_lock:
                 if axis_name == "X":
@@ -209,10 +248,11 @@ class Interpreter:
                     bound_rate = line.split(" ")[1].strip()
                     del line
 
-                    try:
-                        self.ser = serial.Serial(com, bound_rate)
-                    except serialutil.SerialException:
-                        self.error_log("serial_err")
+                    if self.exec_flag:
+                        try:
+                            self.ser = serial.Serial(com, bound_rate)
+                        except serialutil.SerialException:
+                            input(self.msgs["serial_err"])
 
                     self.state = State.ORDER
                     continue
@@ -233,6 +273,8 @@ class Interpreter:
                         self.send_dual_axis(self.line.strip())
                     elif cmd_head == "delay":
                         self.delay_sec(self.line.strip())
+                    elif cmd_head == "join":
+                        self.waiting_for_axis()
                     elif cmd_head == "echoff" or cmd_head == "ab" or cmd_head == "e":
                         self.serial_output(self.line.strip())
                     elif cmd_head == "set":
@@ -245,6 +287,7 @@ class Interpreter:
                             self.loop_time = int(self.line.split(" ")[1].strip())
                         except ValueError:
                             self.error_log("convert_err")
+                        self.entry_line_number = self.line_number + 1
                         self.state = State.IN_WHILE
                         continue
                     else:
@@ -264,9 +307,9 @@ class Interpreter:
                             self.state = State.ORDER
                         continue
                     else:
-                        if self.content_check(self.cmd_list, self.line.split(" ")[0]):
+                        if self.content_check(self.cmd_list, self.line.split(" ")[0].strip()):
                             if self.exec_flag == 0:
-                                self.check_output(self.line.strip())
+                                self.serial_output(self.line.strip())
                             self.loop_body += self.line
                         else:
                             self.error_log("cmd_err")
@@ -279,18 +322,21 @@ class Interpreter:
                             cmd_head = line.strip().split(' ')[0].strip()
                             if cmd_head == "delay":
                                 self.delay_sec(line)
+                            elif cmd_head == "join":
+                                self.waiting_for_axis()
                             elif cmd_head == "ctrl" or cmd_head == "zero":
                                 self.send_dual_axis(line)
                             elif cmd_head == "echoff" or cmd_head == "ab" or cmd_head == "e":
-                                self.serial_output(line)
+                                self.serial_output(line, line_number=self.entry_line_number + i)
                             elif cmd_head == "set":
                                 if self.content_check(self.mstep_list, self.line.split(" ")[2].strip()):
-                                    self.serial_output(self.line)
+                                    self.serial_output(self.line, line_number=self.entry_line_number + i)
                                 else:
-                                    self.error_log("mstep_err")
+                                    self.error_log("mstep_err", line_number=self.entry_line_number + i)
                             else:
-                                self.error_log("cmd_err")
+                                self.error_log("cmd_err", line_number=self.entry_line_number + i)
                     self.loop_body = ""
+                    self.entry_line_number = 0
                     self.state = State.ORDER
 
                 elif self.state == State.COMPLETE:
@@ -311,6 +357,6 @@ class Interpreter:
                     pass
 
 
-i = Interpreter()
-t_main = threading.Thread(target=i.thread_main)
+instance = Interpreter()
+t_main = threading.Thread(target=instance.thread_main)
 t_main.start()
