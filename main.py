@@ -1,11 +1,11 @@
-import inspect
-import threading
-from enum import Enum
-import queue
-import serial
 from serial import serialutil
-import sys
+from enum import Enum
+import threading
+import inspect
+import serial
+import queue
 import time
+import sys
 
 
 class State(Enum):
@@ -19,7 +19,7 @@ class State(Enum):
 class Interpreter:
     msgs = {
         # Errors
-        "serial_err": "Wrong serial parameter!",
+        "serial_err": "Wrong serial parameter! Press Enter to force continue.",
         "cmd_err": "Wrong command! Please check Usage!",
         "mstep_err": "Wrong mstep number! Please check input number!",
         "convert_err": "Catch Value error! Please check the numerical parameters!",
@@ -354,6 +354,11 @@ class Interpreter:
                         exit()
                     else:
                         input(self.msgs["check_cpl"])
+                        self.x_queue.put("stop")
+                        self.y_queue.put("stop")
+                        self.tx.join()
+                        self.ty.join()
+                        exit()
                     pass
 
 
