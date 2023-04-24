@@ -10,14 +10,6 @@ import time
 import sys
 
 
-class State(Enum):
-    INIT = 0
-    ORDER = 1
-    IN_WHILE = 2
-    LOOP_OUT = 3
-    COMPLETE = 4
-
-
 class Interpreter:
     msgs = {
         # Errors
@@ -203,12 +195,10 @@ class Interpreter:
                     reply = self.serial_input(axis)
                     if line.split(" ")[0] == "ctrl":
                         if reply == axis + "stop":
-                            print("......OK")
                             output_flag = 0
                             break
                     elif line.split(" ")[0] == "zero":
                         if reply == axis + "zero":
-                            print("......OK")
                             output_flag = 0
                             break
 
