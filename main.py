@@ -1,3 +1,5 @@
+import os
+
 from serial import serialutil
 from enum import Enum
 import threading
@@ -21,6 +23,8 @@ class Interpreter:
         # Errors
         "serial_err": "Wrong serial parameter! Press Enter to force continue.",
         "cmd_err": "Wrong command! Please check Usage!",
+        "axis_err": "Wrong command axis! Please check Usage!",
+        "para_err": "Wrong number of parameters! Please check Usage!",
         "mstep_err": "Wrong mstep number! Please check input number!",
         "convert_err": "Catch Value error! Please check the numerical parameters!",
         "type_err": "Catch Type error! Please check the parameters!",
@@ -32,17 +36,15 @@ class Interpreter:
         "ask_if_run": "Would you like to run the script or just check it out?\nY for run, n for check.\nInput(Y/n):"
     }
 
-    cmd_list = ["ctrl", "echoff", "delay", "while", "endwhile", "e", "ab", "set", "join"]
+    cmd_list = ["ctrl", "echoff", "delay", "while", "endwhile", "e", "ab", "set", "join", "zero"]
 
     mstep_list = ["200", "400", "800", "1600", "3200", "6400", "12800", "25600",
                   "1000", "2000", "4000", "5000", "8000", "10000", "20000", "25000"]
 
     def __init__(self):
         # 初始化定义实例变量
+        self.f = None
         self.ser = None
-        self.state = State.INIT
-        self.line_number = 0  # 记录当前行号
-        self.entry_line_number = 0  # 记录当前行号
         self.line = ""
         self.loop_time = 0
         self.loop_body = ""  # 记录循环体代码
@@ -78,17 +80,6 @@ class Interpreter:
         else:
             self.exec_flag = 0
 
-    def thread_input(self):
-        if self.ser is None:
-            reply = input()
-        else:
-            reply = self.ser.readline()
-
-        self.x_queue.put(reply)
-        self.y_queue.put(reply)
-
-        self.t_in = None
-
     def serial_input(self, axis: str, msg=None):
         with self.data_lock:
             if msg is not None:
@@ -102,22 +93,20 @@ class Interpreter:
         elif axis == "Y":
             return self.y_queue.get()
 
-    def error_log(self, msg: str, line_number=None):
-        if line_number is None:
-            line_number = self.line_number
-
+    def error_log(self, msg: str, line_number: int):
         if inspect.stack()[1].function == "thread_main":
             self.waiting_for_axis()
 
         with self.data_lock:
             print("[Error]: " + str(line_number) + ": " + self.msgs[msg])
         if self.exec_flag:
-            input(self.msgs["exec_err"])
-            # self.x_queue.put("stop")
-            # self.y_queue.put("stop")
-            # self.tx.join()
-            # self.ty.join()
-            # exit()
+            input()
+            if msg != "serial_err":
+                self.x_queue.put("stop")
+                self.y_queue.put("stop")
+                self.tx.join()
+                self.ty.join()
+                exit()
 
     @staticmethod
     def content_check(content_list: list, content: str):
@@ -126,13 +115,7 @@ class Interpreter:
                 return True
         return False
 
-    def serial_output(self, command: str, line_number=None):
-        if line_number is None:
-            line_number = self.line_number
-
-        if inspect.stack()[1].function == "thread_main":
-            self.waiting_for_axis()
-
+    def serial_output(self, command: str, line_number: int):
         if self.content_check(self.cmd_list, command.split(" ")[0].strip().lower()):
             with self.data_lock:
                 if self.exec_flag:
@@ -143,7 +126,7 @@ class Interpreter:
                     print("[Checking] " + command)
             time.sleep(0.01)
         else:
-            self.error_log("cmd_err")
+            self.error_log("cmd_err", line_number)
         pass
 
     def waiting_for_axis(self):
@@ -156,36 +139,37 @@ class Interpreter:
                 if not self.z_cond_flag:
                     self.z_cond.wait()
 
-    def send_dual_axis(self, command: str):
+    def send_dual_axis(self, command: str, line_number: int):
         axis = command.split(" ")[1].lower()
         while True:
             if axis == "x" and self.x_cond_flag:
                 with self.data_lock:
                     self.x_cond_flag = False
-                    self.x_queue.put(command.strip())
+                    self.x_queue.put(str(line_number) + ":" + command.strip())
                     break
             elif axis == "y" and self.y_cond_flag:
                 with self.data_lock:
                     self.y_cond_flag = False
-                    self.y_queue.put(command.strip())
+                    self.y_queue.put(str(line_number) + ":" + command.strip())
                     break
             elif axis == "z" and self.z_cond_flag:
                 with self.data_lock:
                     self.z_cond_flag = False
-                    self.z_queue.put(command.strip())
+                    self.z_queue.put(str(line_number) + ":" + command.strip())
                     break
             else:
                 self.waiting_for_axis()
 
-    def delay_sec(self, line: str):
-        with self.data_lock:
-            try:
-                delay_time = float(line.split(' ')[1])
-                print("Delay for " + str(time) + " seconds.")
-                if self.exec_flag:
-                    time.sleep(delay_time)
-            except ValueError:
-                self.error_log("convert_err")
+    def thread_input(self):
+        if self.ser is None:
+            reply = input()
+        else:
+            reply = self.ser.readline()
+
+        self.x_queue.put(reply)
+        self.y_queue.put(reply)
+
+        self.t_in = None
 
     def thread_axis(self, axis: str, q: queue.Queue):
         axis_name = axis.strip().upper()
@@ -193,18 +177,25 @@ class Interpreter:
             output_flag = 0
 
             line = q.get()
+
             if line == "stop":
                 exit()
-
+                continue
             elif line == "Xstop" or line == "Ystop" \
                     or line == "Xzero" or line == "Yzero":
                 continue
+            else:
+                try:
+                    line_number = int(line.split(":")[0])
+                    line = line.split(":")[1]
+                except:
+                    continue
 
             if type(line) == str:
-                self.serial_output(line)
+                self.serial_output(line, line_number)
                 output_flag = 1
             else:
-                self.error_log("type_err")
+                self.error_log("type_err", line_number)
 
             # 等待线程接收运行结果
             if self.exec_flag:
@@ -212,10 +203,12 @@ class Interpreter:
                     reply = self.serial_input(axis)
                     if line.split(" ")[0] == "ctrl":
                         if reply == axis + "stop":
+                            print("......OK")
                             output_flag = 0
                             break
                     elif line.split(" ")[0] == "zero":
                         if reply == axis + "zero":
+                            print("......OK")
                             output_flag = 0
                             break
 
@@ -230,138 +223,185 @@ class Interpreter:
                     self.z_cond_flag = True
                     self.z_cond.notify()
 
+    def parse_ctrl(self, line: str, line_number: int):
+        length = len(line.split(" "))
+
+        if length != 4:
+            self.error_log("para_err", line_number)
+            return
+
+        self.send_dual_axis(line, line_number)
+        pass
+
+    def parse_echoff(self, line: str, line_number: int):
+        length = len(line.split(" "))
+
+        if length != 1:
+            self.error_log("para_err", line_number)
+            return
+
+        self.serial_output(line, line_number)
+        pass
+
+    def parse_delay(self, line: str, line_number: int):
+        length = len(line.split(" "))
+
+        if length != 2:
+            self.error_log("para_err", line_number)
+            return
+
+        with self.data_lock:
+            try:
+                delay_time = float(line.split(' ')[1])
+                if self.exec_flag:
+                    print("[Running]" + line)
+                    time.sleep(delay_time)
+                else:
+                    print("[Checking]" + line)
+            except ValueError:
+                self.error_log("convert_err", line_number)
+        pass
+
+    def parse_while(self, line: str, line_number: int):
+        length = len(line.split(" "))
+
+        if length != 2:
+            self.error_log("para_err", line_number)
+            return
+
+        try:
+            local_loop_time = int(line.split(" ")[1])
+        except ValueError:
+            self.error_log("convert_err", line_number)
+            return
+
+        local_line_number = line_number
+
+        for i in range(local_loop_time):
+            local_line = self.f.readline()
+            local_line_number += 1
+            if line.strip() == "endwhile":
+                return local_line_number
+            else:
+                self.parse(local_line, local_line_number)
+
+    def parse_e(self, line: str, line_number: int):
+        self.waiting_for_axis()
+        self.serial_output(line, line_number)
+        pass
+
+    def parse_ab(self, line: str, line_number: int):
+        length = len(line.split(" "))
+        if length == 2:
+            axis = line.split(" ")[1]
+        else:
+            self.error_log("cmd_err", line_number)
+            return
+        if axis.lower() != "x" or axis.lower() != "y":
+            self.error_log("axis_err", line_number)
+            return
+
+        self.waiting_for_axis()
+        self.serial_output(line, line_number)
+
+    def parse_set(self, line: str, line_number: int):
+        length = len(line.split(" "))
+        if length == 3:
+            axis = line.split(" ")[1]
+            if not self.content_check(self.mstep_list, line.split(" ")[2].strip()):
+                self.error_log("mstep_err", line_number)
+                return
+        else:
+            self.error_log("para_err", line_number)
+            return
+        if not (axis.lower() == "x" or axis.lower() == "y"):
+            self.error_log("axis_err", line_number)
+
+        self.waiting_for_axis()
+        self.serial_output(line, line_number)
+
+    def parse_join(self, line: str, line_number: int):
+        length = len(line.split(" "))
+
+        if length != 1:
+            self.error_log("para_err", line_number)
+            return
+
+        self.serial_output(line, line_number)
+        self.waiting_for_axis()
+        pass
+
+    def parse_zero(self, line: str, line_number: int):
+        length = len(line.split(" "))
+
+        if length != 2:
+            self.error_log("para_err", line_number)
+            return
+
+        self.send_dual_axis(line, line_number)
+        pass
+
+    def parse(self, line: str, line_number: int):
+        line = line.strip()
+        cmd_head = line.split(" ")[0]
+        match cmd_head:
+            case "ctrl":
+                self.parse_ctrl(line, line_number)
+            case "echoff":
+                self.parse_echoff(line, line_number)
+            case "delay":
+                self.parse_delay(line, line_number)
+            case "join":
+                self.parse_join(line, line_number)
+            case "while":
+                self.parse_while(line, line_number)
+            case "e":
+                self.parse_e(line, line_number)
+            case "zero":
+                self.parse_zero(line, line_number)
+            case "ab":
+                self.parse_ab(line, line_number)
+            case "set":
+                self.parse_set(line, line_number)
+            case "endwhile":
+                pass
+            case _:
+                self.error_log("cmd_err", line_number)
+
     def thread_main(self):
-        with open(self.file_path, 'r') as f:
-            while True:
-                if self.state == State.INIT:
-                    # Start the axis threads
-                    self.tx = threading.Thread(target=self.thread_axis, args=("X", self.x_queue))
-                    self.tx.start()
+        # Start the axis threads
+        self.tx = threading.Thread(target=self.thread_axis, args=("X", self.x_queue))
+        self.tx.start()
 
-                    self.ty = threading.Thread(target=self.thread_axis, args=("Y", self.y_queue))
-                    self.ty.start()
+        self.ty = threading.Thread(target=self.thread_axis, args=("Y", self.y_queue))
+        self.ty.start()
 
-                    # try to read the file and open the serial port
-                    line = f.readline()
-                    self.line_number += 1
-                    com = line.split(" ")[0].strip()
-                    bound_rate = line.split(" ")[1].strip()
-                    del line
+        line_number = 1
+        with open(self.file_path, "r") as self.f:
+            line = self.f.readline()
+            if len(line.split(" ")) != 3:
+                self.error_log("para_err", line_number)
 
-                    if self.exec_flag:
-                        try:
-                            self.ser = serial.Serial(com, bound_rate)
-                        except serialutil.SerialException:
-                            input(self.msgs["serial_err"])
+            try:
+                self.ser = serial.Serial(line.split(" ")[0], line.split(" ")[1])
+            except serialutil.SerialException:
+                self.error_log("serial_err", line_number)
 
-                    self.state = State.ORDER
+            while line != "":
+                line = self.f.readline()
+                line_number += 1
+                if line.strip() == "":
                     continue
+                self.parse(line, line_number)
 
-                elif self.state == State.ORDER:
-                    self.line = f.readline()
-                    self.line_number += 1
-
-                    if self.line == "\n":
-                        continue
-                    elif self.line == "":
-                        self.state = State.COMPLETE
-                        continue
-                    cmd_head = self.line.split(" ")[0].strip()
-
-                    # "ctrl", "echoff", "delay", "while", "endwhile", "e", "ab", "set"
-                    if cmd_head == "ctrl":
-                        self.send_dual_axis(self.line.strip())
-                    elif cmd_head == "delay":
-                        self.delay_sec(self.line.strip())
-                    elif cmd_head == "join":
-                        self.waiting_for_axis()
-                    elif cmd_head == "echoff" or cmd_head == "ab" or cmd_head == "e":
-                        self.serial_output(self.line.strip())
-                    elif cmd_head == "set":
-                        if self.content_check(self.mstep_list, self.line.split(" ")[2].strip()):
-                            self.serial_output(self.line.strip())
-                        else:
-                            self.error_log("mstep_err")
-                    elif cmd_head == "while":
-                        try:
-                            self.loop_time = int(self.line.split(" ")[1].strip())
-                        except ValueError:
-                            self.error_log("convert_err")
-                        self.entry_line_number = self.line_number + 1
-                        self.state = State.IN_WHILE
-                        continue
-                    else:
-                        self.error_log("cmd_err")
-
-                elif self.state == State.IN_WHILE:
-                    self.line = f.readline()
-                    self.line_number += 1
-
-                    if self.line == "\n":
-                        continue
-
-                    if self.line.strip() == "endwhile":
-                        if self.exec_flag == 1:
-                            self.state = State.LOOP_OUT
-                        else:
-                            self.state = State.ORDER
-                        continue
-                    else:
-                        if self.content_check(self.cmd_list, self.line.split(" ")[0].strip()):
-                            if self.exec_flag == 0:
-                                self.serial_output(self.line.strip())
-                            self.loop_body += self.line
-                        else:
-                            self.error_log("cmd_err")
-
-                elif self.state == State.LOOP_OUT:
-                    body_len = len(self.loop_body.split("\n"))
-                    for j in range(self.loop_time):
-                        for i in range(0, body_len - 1):
-                            line = self.loop_body.split("\n")[i]
-                            cmd_head = line.strip().split(' ')[0].strip()
-                            if cmd_head == "delay":
-                                self.delay_sec(line)
-                            elif cmd_head == "join":
-                                self.waiting_for_axis()
-                            elif cmd_head == "ctrl" or cmd_head == "zero":
-                                self.send_dual_axis(line)
-                            elif cmd_head == "echoff" or cmd_head == "ab" or cmd_head == "e":
-                                self.serial_output(line, line_number=self.entry_line_number + i)
-                            elif cmd_head == "set":
-                                if self.content_check(self.mstep_list, self.line.split(" ")[2].strip()):
-                                    self.serial_output(self.line, line_number=self.entry_line_number + i)
-                                else:
-                                    self.error_log("mstep_err", line_number=self.entry_line_number + i)
-                            else:
-                                self.error_log("cmd_err", line_number=self.entry_line_number + i)
-                    self.loop_body = ""
-                    self.entry_line_number = 0
-                    self.state = State.ORDER
-
-                elif self.state == State.COMPLETE:
-                    try:
-                        if self.ser is not None:
-                            self.ser.close()
-                    except NameError or AttributeError:
-                        pass
-                    if self.exec_flag:
-                        input(self.msgs["exec_cpl"])
-                        self.x_queue.put("stop")
-                        self.y_queue.put("stop")
-                        self.tx.join()
-                        self.ty.join()
-                        exit()
-                    else:
-                        input(self.msgs["check_cpl"])
-                        self.x_queue.put("stop")
-                        self.y_queue.put("stop")
-                        self.tx.join()
-                        self.ty.join()
-                        exit()
-                    pass
+        self.x_queue.put("stop")
+        self.y_queue.put("stop")
+        self.tx.join()
+        self.ty.join()
+        print(self.msgs["exec_cpl"])
+        os.system("pause")
+        exit()
 
 
 instance = Interpreter()
-t_main = threading.Thread(target=instance.thread_main)
-t_main.start()
+instance.thread_main()
