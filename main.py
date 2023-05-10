@@ -1,8 +1,4 @@
-import os
-import platform
-
 from serial import serialutil
-from enum import Enum
 import threading
 import inspect
 import serial
@@ -99,7 +95,7 @@ class Interpreter:
                 self.y_queue.put("stop")
                 self.tx.join()
                 self.ty.join()
-                exit()
+                sys.exit()
 
     @staticmethod
     def content_check(content_list: list, content: str):
@@ -124,14 +120,19 @@ class Interpreter:
 
     def waiting_for_axis(self, axis="xyz"):
         with self.data_lock:
-            while not (self.x_cond_flag and self.y_cond_flag and self.z_cond_flag):
+            flag = self.x_cond_flag and self.y_cond_flag and self.z_cond_flag
+            while not flag:
+                flag = 1
                 if "x" in axis:
+                    flag = flag and self.x_cond_flag
                     if not self.x_cond_flag:
                         self.x_cond.wait()
                 if "y" in axis:
+                    flag = flag and self.y_cond_flag
                     if not self.y_cond_flag:
                         self.y_cond.wait()
                 if "z" in axis:
+                    flag = flag and self.z_cond_flag
                     if not self.z_cond_flag:
                         self.z_cond.wait()
 
@@ -210,6 +211,11 @@ class Interpreter:
                         if reply == axis + "zero":
                             output_flag = 0
                             break
+            else:
+                if output_flag:
+                    with self.data_lock:
+                        time.sleep(0.05)
+                        output_flag = 0
 
             with self.data_lock:
                 if axis_name == "X":
@@ -275,14 +281,18 @@ class Interpreter:
             return
 
         local_line_number = line_number
+        fp = self.f.tell()
 
         for i in range(local_loop_time):
-            local_line = self.f.readline()
-            local_line_number += 1
-            if line.strip() == "endwhile":
-                return local_line_number
-            else:
-                self.parse(local_line, local_line_number)
+            self.f.seek(fp)
+            while True:
+                local_line = self.f.readline()
+                local_line_number += 1
+                if local_line.strip() == "endwhile":
+                    break
+                else:
+                    self.parse(local_line, local_line_number)
+        return local_line_number
 
     def parse_e(self, line: str, line_number: int):
         self.waiting_for_axis()
@@ -325,13 +335,6 @@ class Interpreter:
         if length > 2:
             self.error_log("para_err", line_number)
             return
-
-        while self.x_running or self.y_running or self.z_running: pass
-
-        if self.exec_flag:
-            print("[Running] " + line)
-        else:
-            print("[Checking] " + line)
 
         self.waiting_for_axis(line.split(" ")[1] if length == 2 else "xyz")
         pass
