@@ -1,0 +1,13 @@
+COM9 9600
+
+echoff
+
+ctrl x 30000 125000
+join
+while 3
+ctrl y 50000 125000
+ctrl x 50000 125000
+ctrl y 50000 125000
+ctrl x 50000 125000
+
+e
