@@ -1,4 +1,5 @@
 import os
+import platform
 
 from serial import serialutil
 from enum import Enum
@@ -28,7 +29,7 @@ class Interpreter:
         "ask_if_run": "Would you like to run the script or just check it out?\nY for run, n for check.\nInput(Y/n):"
     }
 
-    cmd_list = ["ctrl", "echoff", "delay", "while", "endwhile", "e", "ab", "set", "join", "zero"]
+    cmd_list = ["ctrl", "echoff", "delay", "while", "endwhile", "e", "ab", "set", "zero"]
 
     mstep_list = ["200", "400", "800", "1600", "3200", "6400", "12800", "25600",
                   "1000", "2000", "4000", "5000", "8000", "10000", "20000", "25000"]
@@ -121,15 +122,18 @@ class Interpreter:
             self.error_log("cmd_err", line_number)
         pass
 
-    def waiting_for_axis(self):
+    def waiting_for_axis(self, axis="xyz"):
         with self.data_lock:
             while not (self.x_cond_flag and self.y_cond_flag and self.z_cond_flag):
-                if not self.x_cond_flag:
-                    self.x_cond.wait()
-                if not self.y_cond_flag:
-                    self.y_cond.wait()
-                if not self.z_cond_flag:
-                    self.z_cond.wait()
+                if "x" in axis:
+                    if not self.x_cond_flag:
+                        self.x_cond.wait()
+                if "y" in axis:
+                    if not self.y_cond_flag:
+                        self.y_cond.wait()
+                if "z" in axis:
+                    if not self.z_cond_flag:
+                        self.z_cond.wait()
 
     def send_dual_axis(self, command: str, line_number: int):
         axis = command.split(" ")[1].lower()
@@ -138,16 +142,19 @@ class Interpreter:
                 with self.data_lock:
                     self.x_cond_flag = False
                     self.x_queue.put(str(line_number) + ":" + command.strip())
+                    while not self.x_running: pass
                     break
             elif axis == "y" and self.y_cond_flag:
                 with self.data_lock:
                     self.y_cond_flag = False
                     self.y_queue.put(str(line_number) + ":" + command.strip())
+                    while not self.y_running: pass
                     break
             elif axis == "z" and self.z_cond_flag:
                 with self.data_lock:
                     self.z_cond_flag = False
                     self.z_queue.put(str(line_number) + ":" + command.strip())
+                    while not self.z_running: pass
                     break
             else:
                 self.waiting_for_axis()
@@ -167,8 +174,8 @@ class Interpreter:
         axis_name = axis.strip().upper()
         while True:
             output_flag = 0
-
             line = q.get()
+            exec("self." + axis.lower() + "_running = True")
 
             if line == "stop":
                 exit()
@@ -188,6 +195,8 @@ class Interpreter:
                 output_flag = 1
             else:
                 self.error_log("type_err", line_number)
+
+            exec("self." + axis.lower() + "_running = False")
 
             # 等待线程接收运行结果
             if self.exec_flag:
@@ -313,12 +322,18 @@ class Interpreter:
     def parse_join(self, line: str, line_number: int):
         length = len(line.split(" "))
 
-        if length != 1:
+        if length > 2:
             self.error_log("para_err", line_number)
             return
 
-        self.serial_output(line, line_number)
-        self.waiting_for_axis()
+        while self.x_running or self.y_running or self.z_running: pass
+
+        if self.exec_flag:
+            print("[Running] " + line)
+        else:
+            print("[Checking] " + line)
+
+        self.waiting_for_axis(line.split(" ")[1] if length == 2 else "xyz")
         pass
 
     def parse_zero(self, line: str, line_number: int):
@@ -369,7 +384,7 @@ class Interpreter:
         line_number = 1
         with open(self.file_path, "r") as self.f:
             line = self.f.readline()
-            if len(line.split(" ")) != 3:
+            if len(line.split(" ")) != 2:
                 self.error_log("para_err", line_number)
 
             try:
@@ -389,7 +404,7 @@ class Interpreter:
         self.tx.join()
         self.ty.join()
         print(self.msgs["exec_cpl"])
-        os.system("pause")
+        input()
         exit()
 
 
